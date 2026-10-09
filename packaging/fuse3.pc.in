@@ -1,0 +1,13 @@
+# Copyright (c) 2026 Raman Dzehtsiar
+# SPDX-License-Identifier: MIT
+
+prefix=/usr
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include/fuse3
+
+Name: fuse3
+Description: FUSE interface adapter for native IBM AIX USFS
+Version: @AIX_FUSE_COMPAT_VERSION@
+Libs: -maix64 -L${libdir} -lfuse3 -lpthreads
+Cflags: -maix64 -I${includedir}

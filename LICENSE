@@ -1,0 +1,34 @@
+AIX FUSE licensing
+==================
+
+This repository combines components under two licenses:
+
+- LICENSE.LGPL-2.1-only contains the complete GNU Lesser General Public
+  License, version 2.1 only, for the adapted libfuse headers and code.
+- LICENSE.MIT contains the MIT copyright and permission notice for original
+  MIT-licensed adapter components, examples, tests, and supporting files.
+  The bundled native USFS client also retains its own MIT license notice.
+
+These licenses apply to their respective components. They are not a choice
+of alternative licenses for the entire project. Per-file SPDX identifiers
+and copyright notices describe the component boundaries.
+
+The combined libfuse3.a library contains components under both MIT and
+LGPL-2.1-only. As a combined library it is governed by LGPL-2.1-only as a
+whole, while its MIT-licensed components retain their MIT copyright and
+permission notices and remain available separately under MIT. Compliance with
+both sets of applicable notices is required; the combined library is not
+offered under MIT alone. RPM metadata is therefore MIT AND LGPL-2.1-only.
+
+The RPM's aix_fuse_mirror and aix_fuse_memfs executables are statically linked
+with libfuse3.a. Each executable uses the LGPL-covered library, and the library
+and its use in the executable are covered by LGPL-2.1-only. The accompanying
+source.tar.gz contains the corresponding library source and the MIT-licensed
+source for both executables so recipients can modify the library and relink
+the executables.
+
+The RPM includes both full license texts and this explanation. It also
+preserves the selected native USFS snapshot's notice as LICENSE.native-usfs,
+with the original retained at bundled/usfs/LICENSE in the corresponding
+source archive. That copy preserves dependency attribution; it does not
+introduce a third license.

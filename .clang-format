@@ -1,0 +1,77 @@
+# Requires clang-format 14 or newer.
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+# Indentation and width
+IndentWidth: 4
+ContinuationIndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 150
+
+# Declarations and spacing
+DerivePointerAlignment: false
+PointerAlignment: Middle
+# Preserve type qualifiers; formatting must not reinterpret declarations.
+QualifierAlignment: Leave
+SpaceBeforeParens: Always
+SpaceBeforeAssignmentOperators: true
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpacesInCStyleCastParentheses: false
+Cpp11BracedListStyle: false
+SpacesInContainerLiterals: true
+
+# Wrapped expressions and parameters
+AlignAfterOpenBracket: BlockIndent
+BinPackArguments: false
+BinPackParameters: false
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: false
+PenaltyReturnTypeOnItsOwnLine: 1000000
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+BreakStringLiterals: false
+
+# Braces and compact constructs
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: true
+  AfterControlStatement: Always
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: true
+  AfterStruct: true
+  AfterUnion: true
+  BeforeCatch: true
+  BeforeElse: true
+  BeforeWhile: true
+  IndentBraces: false
+  SplitEmptyFunction: true
+  SplitEmptyRecord: true
+  SplitEmptyNamespace: true
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# Alignment and whitespace preservation
+AlignConsecutiveAssignments: None
+AlignConsecutiveDeclarations: None
+AlignConsecutiveMacros: true
+AlignTrailingComments: true
+MaxEmptyLinesToKeep: 2
+KeepEmptyLinesAtTheStartOfBlocks: false
+ReflowComments: false
+
+# C control-flow labels and preprocessing
+IndentCaseLabels: true
+IndentGotoLabels: false
+IndentPPDirectives: BeforeHash
+AlignEscapedNewlines: Right
+
+# Implementation headers can depend on preceding includes in the same unit.
+SortIncludes: false
+IncludeBlocks: Preserve
