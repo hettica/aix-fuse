@@ -48,6 +48,7 @@ struct fuse
 struct callback_scope
 {
     struct fuse_context context;      // Context borrowed until this callback returns.
+    struct fuse_object_identity object_identity; // Storage for the selected native object.
     pthread_t owner;                  // Thread executing this callback.
     struct callback_scope * previous; // Newer active callback in the registry.
     struct callback_scope * next;     // Older active callback in the registry.
@@ -79,6 +80,18 @@ static void leave_callback (struct callback_scope * scope)
     pthread_mutex_unlock (&callback_scope_lock);
 }
 
+static struct fuse_object_identity adapt_object_identity (const struct usfs_object_identity * native)
+{
+    struct fuse_object_identity identity = { 0 };
+    identity.nodeid = native->nodeid;
+    identity.backend_dev = native->backend_dev;
+    identity.backend_ino = native->backend_ino;
+    identity.backend_type = native->backend_type;
+    identity.has_backend_identity = native->has_backend_identity;
+
+    return identity;
+}
+
 static void enter_callback (struct fuse * fuse, const struct usfs_client_request * request, struct callback_scope * scope)
 {
     struct fuse_context context = { 0 };
@@ -87,6 +100,13 @@ static void enter_callback (struct fuse * fuse, const struct usfs_client_request
     context.uid = usfs_request_uid (request);
     context.gid = usfs_request_gid (request);
     context.pid = usfs_request_pid (request);
+
+    const struct usfs_object_identity * native_identity = usfs_request_object_identity (request);
+    if (native_identity != NULL)
+    {
+        scope->object_identity = adapt_object_identity (native_identity);
+        context.object_identity = &scope->object_identity;
+    }
 
     scope->context = context;
     scope->owner = pthread_self ();
@@ -347,35 +367,54 @@ static int bridge_mkdir (const struct usfs_client_request * request, const char 
     return result;
 }
 
-static int bridge_rmdir (const struct usfs_client_request * request, const char * path)
+static struct fuse_expected_entry adapt_expected_entry (const struct usfs_expected_entry * native)
+{
+    struct fuse_expected_entry expected = { 0 };
+    expected.path = native->path;
+    expected.parent = adapt_object_identity (&native->parent);
+    expected.object = adapt_object_identity (&native->object);
+    expected.exists = native->exists;
+
+    return expected;
+}
+
+static int bridge_rmdir (const struct usfs_client_request * request, const struct usfs_expected_entry * native)
 {
     struct fuse * fuse = usfs_request_user_data (request);
     struct callback_scope scope __attribute__ ((cleanup (leave_callback))) = { 0 };
     enter_callback (fuse, request, &scope);
 
-    const int result = fuse->ops.rmdir (path);
+    const struct fuse_expected_entry expected = adapt_expected_entry (native);
+    const int result = fuse->ops.rmdir_checked (&expected);
 
     return result;
 }
 
-static int bridge_unlink (const struct usfs_client_request * request, const char * path)
+static int bridge_unlink (const struct usfs_client_request * request, const struct usfs_expected_entry * native)
 {
     struct fuse * fuse = usfs_request_user_data (request);
     struct callback_scope scope __attribute__ ((cleanup (leave_callback))) = { 0 };
     enter_callback (fuse, request, &scope);
 
-    const int result = fuse->ops.unlink (path);
+    const struct fuse_expected_entry expected = adapt_expected_entry (native);
+    const int result = fuse->ops.unlink_checked (&expected);
 
     return result;
 }
 
-static int bridge_rename (const struct usfs_client_request * request, const char * old_path, const char * new_path)
+static int bridge_rename (
+    const struct usfs_client_request * request,
+    const struct usfs_expected_entry * native_source,
+    const struct usfs_expected_entry * native_destination
+)
 {
     struct fuse * fuse = usfs_request_user_data (request);
     struct callback_scope scope __attribute__ ((cleanup (leave_callback))) = { 0 };
     enter_callback (fuse, request, &scope);
 
-    const int result = fuse->ops.rename (old_path, new_path, 0);
+    const struct fuse_expected_entry source = adapt_expected_entry (native_source);
+    const struct fuse_expected_entry destination = adapt_expected_entry (native_destination);
+    const int result = fuse->ops.rename_checked (&source, &destination);
 
     return result;
 }
@@ -553,6 +592,93 @@ static int bridge_release (const struct usfs_client_request * request, const cha
     return result;
 }
 
+static int bridge_pager_acquire (const struct usfs_client_request * request, const char * path, struct usfs_pager_file * file)
+{
+    struct fuse * fuse = usfs_request_user_data (request);
+    struct callback_scope scope __attribute__ ((cleanup (leave_callback))) = { 0 };
+    enter_callback (fuse, request, &scope);
+
+    struct fuse_pager_file adapted = { 0 };
+    const int result = fuse->ops.pager_acquire (path, scope.context.object_identity, &adapted);
+    if (result == 0)
+        file->value = adapted.value;
+
+    return result;
+}
+
+static int bridge_pager_authorize (const struct usfs_client_request * request, enum usfs_pager_access access)
+{
+    struct fuse * fuse = usfs_request_user_data (request);
+    struct callback_scope scope __attribute__ ((cleanup (leave_callback))) = { 0 };
+    enter_callback (fuse, request, &scope);
+
+    return fuse->ops.pager_authorize (scope.context.object_identity, (enum fuse_pager_access)access);
+}
+
+static int bridge_pager_enable_write (const struct usfs_client_request * request, struct usfs_pager_file * file)
+{
+    struct fuse * fuse = usfs_request_user_data (request);
+    struct callback_scope scope __attribute__ ((cleanup (leave_callback))) = { 0 };
+    enter_callback (fuse, request, &scope);
+
+    struct fuse_pager_file adapted = { .value = file->value };
+    const int result = fuse->ops.pager_enable_write (&adapted);
+    file->value = adapted.value;
+
+    return result;
+}
+
+static ssize_t bridge_pager_read (
+    const struct usfs_client_request * request,
+    char * buffer,
+    size_t size,
+    off_t offset,
+    struct usfs_pager_file * file
+)
+{
+    struct fuse * fuse = usfs_request_user_data (request);
+    struct callback_scope scope __attribute__ ((cleanup (leave_callback))) = { 0 };
+    enter_callback (fuse, request, &scope);
+
+    struct fuse_pager_file adapted = { .value = file->value };
+    const ssize_t result = fuse->ops.pager_read (buffer, size, offset, &adapted);
+    file->value = adapted.value;
+
+    return result;
+}
+
+static ssize_t bridge_pager_write (
+    const struct usfs_client_request * request,
+    const char * buffer,
+    size_t size,
+    off_t offset,
+    struct usfs_pager_file * file
+)
+{
+    struct fuse * fuse = usfs_request_user_data (request);
+    struct callback_scope scope __attribute__ ((cleanup (leave_callback))) = { 0 };
+    enter_callback (fuse, request, &scope);
+
+    struct fuse_pager_file adapted = { .value = file->value };
+    const ssize_t result = fuse->ops.pager_write (buffer, size, offset, &adapted);
+    file->value = adapted.value;
+
+    return result;
+}
+
+static int bridge_pager_release (const struct usfs_client_request * request, struct usfs_pager_file * file)
+{
+    struct fuse * fuse = usfs_request_user_data (request);
+    struct callback_scope scope __attribute__ ((cleanup (leave_callback))) = { 0 };
+    enter_callback (fuse, request, &scope);
+
+    struct fuse_pager_file adapted = { .value = file->value };
+    const int result = fuse->ops.pager_release (&adapted);
+    file->value = adapted.value;
+
+    return result;
+}
+
 static int bridge_syncfs (const struct usfs_client_request * request, const char * path)
 {
     struct fuse * fuse = usfs_request_user_data (request);
@@ -583,7 +709,7 @@ static int bridge_opendir (const struct usfs_client_request * request, const cha
 static int bridge_readdir (
     const struct usfs_client_request * request,
     const char * path,
-    struct usfs_open_file * file,
+    const struct usfs_object_identity * identity,
     struct usfs_directory_sink * sink
 )
 {
@@ -591,12 +717,14 @@ static int bridge_readdir (
     struct callback_scope scope __attribute__ ((cleanup (leave_callback))) = { 0 };
     enter_callback (fuse, request, &scope);
 
-    struct fuse_file_info adapted = { 0 };
-    struct fuse_file_info * file_info = import_open_file (&adapted, file);
+    scope.context.object_identity = NULL;
+    if (identity != NULL)
+    {
+        scope.object_identity = adapt_object_identity (identity);
+        scope.context.object_identity = &scope.object_identity;
+    }
 
-    const int result = fuse->ops.readdir (path, sink, fill_directory, 0, file_info, FUSE_READDIR_DEFAULTS);
-
-    export_open_file (file, &adapted);
+    const int result = fuse->ops.readdir (path, sink, fill_directory, 0, NULL, FUSE_READDIR_DEFAULTS);
 
     return result;
 }
@@ -692,13 +820,13 @@ static void select_native_operations (const struct fuse * fuse, struct usfs_oper
     if (fuse->ops.mkdir != NULL)
         operations->mkdir = bridge_mkdir;
 
-    if (fuse->ops.rmdir != NULL)
+    if (fuse->ops.rmdir_checked != NULL)
         operations->rmdir = bridge_rmdir;
 
-    if (fuse->ops.unlink != NULL)
+    if (fuse->ops.unlink_checked != NULL)
         operations->unlink = bridge_unlink;
 
-    if (fuse->ops.rename != NULL)
+    if (fuse->ops.rename_checked != NULL)
         operations->rename = bridge_rename;
 
     if (fuse->ops.link != NULL)
@@ -730,6 +858,24 @@ static void select_native_operations (const struct fuse * fuse, struct usfs_oper
 
     if (fuse->ops.release != NULL)
         operations->release = bridge_release;
+
+    if (fuse->ops.pager_acquire != NULL)
+        operations->pager_acquire = bridge_pager_acquire;
+
+    if (fuse->ops.pager_authorize != NULL)
+        operations->pager_authorize = bridge_pager_authorize;
+
+    if (fuse->ops.pager_enable_write != NULL)
+        operations->pager_enable_write = bridge_pager_enable_write;
+
+    if (fuse->ops.pager_read != NULL)
+        operations->pager_read = bridge_pager_read;
+
+    if (fuse->ops.pager_write != NULL)
+        operations->pager_write = bridge_pager_write;
+
+    if (fuse->ops.pager_release != NULL)
+        operations->pager_release = bridge_pager_release;
 
     if (fuse->ops.syncfs != NULL)
         operations->syncfs = bridge_syncfs;

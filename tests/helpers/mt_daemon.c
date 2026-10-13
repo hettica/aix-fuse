@@ -438,13 +438,23 @@ static int wait_namespace_release (const char * release_path)
     return 0;
 }
 
-static int mt_namespace_rename (const char * old_path, const char * new_path, unsigned flags)
+static int mt_namespace_rename (const struct fuse_expected_entry * source, const struct fuse_expected_entry * destination)
 {
-    if (strcmp (old_path, "/old") || strcmp (new_path, "/new") || flags)
+    if (strcmp (source->path, "/old") != 0 || strcmp (destination->path, "/new") != 0)
         return -EINVAL;
+
     pthread_mutex_lock (&state_lock);
+    if (namespace_moved || !source->exists || destination->exists || source->parent.nodeid != FUSE_ROOT_NODE_ID ||
+        destination->parent.nodeid != FUSE_ROOT_NODE_ID || !source->object.has_backend_identity || source->object.backend_ino != 2 ||
+        source->object.backend_type != S_IFDIR)
+    {
+        pthread_mutex_unlock (&state_lock);
+        return -ESTALE;
+    }
+
     namespace_moved = 1;
     pthread_mutex_unlock (&state_lock);
+
     puts ("USFS_RENAME_COMMITTED");
     fflush (stdout);
     return wait_namespace_release (getenv ("USFS_MT_NAMESPACE_RELEASE"));
@@ -714,7 +724,7 @@ int main (const int argc, char ** argv)
     {
         struct fuse_operations operations = mt_operations;
         namespace_mode = 1;
-        operations.rename = mt_namespace_rename;
+        operations.rename_checked = mt_namespace_rename;
         return fuse_main (argc, argv, &operations, NULL);
     }
     if (retry != NULL)

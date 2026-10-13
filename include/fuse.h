@@ -54,9 +54,11 @@ struct fuse;
  * and can be overridden by init. With nullpath_ok unset, named callbacks use
  * the current resolving path, including managed hidden names.
  * A detached object can also have a NULL path after hard_remove or rmdir.
- * Backends that support these cases must resolve the object through fi;
- * never substitute a removed object's former pathname. USFS retains handle
- * ownership through these callbacks. A backend may legitimately leave fh zero. */
+ * Backends that support these cases must resolve the object through fi,
+ * or through fuse_get_context()->object_identity when no fi exists. Never
+ * substitute a removed object's former pathname. readdir has no fi from
+ * AIX; it receives NULL fi and the selected directory identity in the
+ * context. A backend may legitimately leave fh zero. */
 
 enum fuse_readdir_flags
 {
@@ -140,16 +142,19 @@ struct flock;
  *
  * The USFS backend invokes: getattr (also for lookups), readlink, open,
  * opendir, read, write, flush, fsync, fsyncdir, release, releasedir, readdir,
- * create, mkdir, unlink, rmdir, rename, symlink, link, chmod, chown, truncate,
- * utimens, statfs, syncfs, init, destroy, export_id and resolve_id.
+ * create, mkdir, symlink, link, chmod, chown, truncate, utimens, statfs,
+ * syncfs, init, destroy, export_id, resolve_id, checked namespace mutations,
+ * and object-scoped pager callbacks when supplied.
  *
  * Which of these a file system implements also decides whether its mount is
  * writable: a file system that provides none of the mutating operations is
  * mounted read-only, and the kernel then refuses writes without consulting it.
  *
  * The remaining members are accepted but not yet called; operations without
- * kernel support fail with ENOSYS on the AIX side. Extended attributes, ACLs
- * and memory mapping are out of scope.
+ * kernel support fail with ENOSYS on the AIX side. Extended attributes and
+ * ACLs are out of scope. Ordinary path-only FUSE unlink, rmdir, and rename
+ * cannot atomically verify AIX's selected object; supply the checked
+ * extensions below. Memory mapping requires the pager extensions below.
  */
 /* Initial attribute bits for the optional atomic USFS creation callback. */
 #define FUSE_INITIAL_MODE  (1u << 0)
@@ -164,6 +169,37 @@ enum fuse_create_activation
     FUSE_CREATE_DEFAULT = 0,
     FUSE_CREATE_LOOKUP = 1,
     FUSE_CREATE_OPEN = 2
+};
+
+#define FUSE_ROOT_NODE_ID 1u
+/* Identities are valid for one mount. The path may disappear while an object
+ * remains open or mapped; a backend must use the identity in that case. */
+struct fuse_object_identity
+{
+    uint64_t nodeid;          // Stable USFS node identifier within this mount.
+    uint64_t backend_dev;     // Cached device number when available.
+    uint64_t backend_ino;     // Cached inode number when available.
+    mode_t backend_type;      // Cached object type when available.
+    int has_backend_identity; // Whether the cached backend fields are valid.
+};
+
+struct fuse_expected_entry
+{
+    const char * path;                  // Borrowed path valid during this callback.
+    struct fuse_object_identity parent; // Selected containing directory.
+    struct fuse_object_identity object; // Selected child when exists is true.
+    int exists;                         // Zero requires the name to remain absent.
+};
+
+struct fuse_pager_file
+{
+    uint64_t value; // Backend-owned object resource; zero is valid.
+};
+
+enum fuse_pager_access
+{
+    FUSE_PAGER_READ_ACCESS = 1u,
+    FUSE_PAGER_WRITE_ACCESS = 2u
 };
 
 struct fuse_operations
@@ -231,6 +267,23 @@ struct fuse_operations
     /* Resolve a token to a current absolute path. Return -ESTALE when the
      * object has no link or this token was never issued by the backend. */
     int (*resolve_id) (uint64_t token, char * path, size_t path_capacity);
+
+    /* These optional callbacks must compare the expected parent and child
+     * identities and mutate atomically. A plain pathname FUSE callback cannot
+     * provide that guarantee and is not used for these USFS operations. */
+    int (*unlink_checked) (const struct fuse_expected_entry * expected);
+    int (*rmdir_checked) (const struct fuse_expected_entry * expected);
+    int (*rename_checked) (const struct fuse_expected_entry * source, const struct fuse_expected_entry * destination);
+
+    /* One stable resource per mapped file object. The resource must survive
+     * close, rename, and unlink. Page I/O has no caller identity or pathname.
+     * Missing callbacks make mmap fail with ENOSYS. */
+    int (*pager_acquire) (const char * path, const struct fuse_object_identity * identity, struct fuse_pager_file * file);
+    int (*pager_authorize) (const struct fuse_object_identity * identity, enum fuse_pager_access access);
+    int (*pager_enable_write) (struct fuse_pager_file * file);
+    ssize_t (*pager_read) (char * buffer, size_t size, off_t offset, struct fuse_pager_file * file);
+    ssize_t (*pager_write) (const char * buffer, size_t size, off_t offset, struct fuse_pager_file * file);
+    int (*pager_release) (struct fuse_pager_file * file);
 };
 
 /**
@@ -244,6 +297,7 @@ struct fuse_context
     pid_t pid;
     void * private_data;
     mode_t umask;
+    const struct fuse_object_identity * object_identity; // Borrowed for this callback, or NULL.
 };
 
 /* ----------------------------------------------------------- *

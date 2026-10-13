@@ -46,6 +46,30 @@
    trailing slash and never "/" (see resolve_source_directory). */
 static char * source_directory_path;
 static size_t source_directory_path_length;
+static struct stat source_root_attributes;
+static int source_root_identity_known;
+
+static int object_matches_identity (
+    const struct stat * attributes,
+    const struct fuse_object_identity * identity,
+    const char * path
+)
+{
+    if (identity == NULL)
+        return true;
+
+    if (identity->has_backend_identity)
+        return (uint64_t)attributes->st_dev == identity->backend_dev &&
+               (uint64_t)attributes->st_ino == identity->backend_ino &&
+               (attributes->st_mode & S_IFMT) == identity->backend_type;
+
+    if (path == NULL || strcmp (path, "/") != 0 || !source_root_identity_known)
+        return false;
+
+    return attributes->st_dev == source_root_attributes.st_dev &&
+           attributes->st_ino == source_root_attributes.st_ino &&
+           (attributes->st_mode & S_IFMT) == (source_root_attributes.st_mode & S_IFMT);
+}
 
 static struct options
 {
@@ -91,6 +115,7 @@ static void * initialize_filesystem (struct fuse_conn_info * connection_info, st
     /* Report the source's own inode numbers rather than synthesised ones,
        so the mirror is comparable with the original tree. */
     filesystem_configuration->use_ino = 1;
+    source_root_identity_known = stat (source_directory_path, &source_root_attributes) == 0;
 
     return NULL;
 }
@@ -133,7 +158,10 @@ static int get_file_attributes (const char * path, struct stat * file_attributes
     if (lstat (source_path, file_attributes) == -1)
         return -errno;
 
-    return 0;
+    const struct fuse_context * context = fuse_get_context ();
+    const struct fuse_object_identity * identity = context != NULL ? context->object_identity : NULL;
+
+    return object_matches_identity (file_attributes, identity, path) ? 0 : -ESTALE;
 }
 
 static int read_symbolic_link (const char * path, char * buffer, size_t buffer_capacity)
@@ -203,6 +231,15 @@ static int read_directory (
     if (directory_stream == NULL)
         return -errno;
 
+    const struct fuse_context * context = fuse_get_context ();
+    const struct fuse_object_identity * identity = context != NULL ? context->object_identity : NULL;
+    struct stat attributes;
+    if (fstat (dirfd (directory_stream), &attributes) != 0 || !object_matches_identity (&attributes, identity, path))
+    {
+        closedir (directory_stream);
+        return -ESTALE;
+    }
+
     const int read_result = read_directory_entries (directory_stream, buffer, add_directory_entry_to_buffer);
     const int close_result = closedir (directory_stream);
     const int close_error = close_result == 0 ? 0 : errno;
@@ -226,6 +263,15 @@ static int open_file (const char * path, struct fuse_file_info * file_info)
     const int file_descriptor = open (source_path, O_RDONLY);
     if (file_descriptor == -1)
         return -errno;
+
+    const struct fuse_context * context = fuse_get_context ();
+    const struct fuse_object_identity * identity = context != NULL ? context->object_identity : NULL;
+    struct stat attributes;
+    if (identity == NULL || fstat (file_descriptor, &attributes) != 0 || !object_matches_identity (&attributes, identity, path))
+    {
+        close (file_descriptor);
+        return -ESTALE;
+    }
 
     /* Offset by one so that "no handle" (0) stays unambiguous: open() can
        legitimately return descriptor 0, and the kernel sends fh 0 for a
@@ -302,6 +348,51 @@ static int synchronize_file (const char * path, const int synchronize_data_only,
     return synchronization_result;
 }
 
+static int acquire_pager_file (const char * path, const struct fuse_object_identity * identity, struct fuse_pager_file * pager_file)
+{
+    if (path == NULL || identity == NULL || !identity->has_backend_identity)
+        return -ESTALE;
+
+    char source_path[PATH_MAX];
+    const int path_result = build_source_path (path, source_path, sizeof (source_path));
+    if (path_result != 0)
+        return path_result;
+
+    const int file_descriptor = open (source_path, O_RDONLY);
+    if (file_descriptor == -1)
+        return -errno;
+
+    struct stat attributes;
+    if (fstat (file_descriptor, &attributes) != 0 || !object_matches_identity (&attributes, identity, path))
+    {
+        close (file_descriptor);
+        return -ESTALE;
+    }
+
+    pager_file->value = (uint64_t)file_descriptor;
+
+    return 0;
+}
+
+static int authorize_pager_mapping (const struct fuse_object_identity * identity, enum fuse_pager_access access)
+{
+    if (identity == NULL)
+        return -ESTALE;
+
+    return access == FUSE_PAGER_READ_ACCESS ? 0 : -EROFS;
+}
+
+static ssize_t read_pager_file (char * buffer, size_t requested_bytes, off_t offset, struct fuse_pager_file * pager_file)
+{
+    const ssize_t bytes_read = pread ((int)pager_file->value, buffer, requested_bytes, offset);
+    return bytes_read == -1 ? -errno : bytes_read;
+}
+
+static int release_pager_file (struct fuse_pager_file * pager_file)
+{
+    return close ((int)pager_file->value) == 0 ? 0 : -errno;
+}
+
 static int synchronize_filesystem (const char * path)
 {
     (void)path;
@@ -334,6 +425,10 @@ static const struct fuse_operations filesystem_operations = {
     .read = read_file,
     .fsync = synchronize_file,
     .release = release_file,
+    .pager_acquire = acquire_pager_file,
+    .pager_authorize = authorize_pager_mapping,
+    .pager_read = read_pager_file,
+    .pager_release = release_pager_file,
     .statfs = get_filesystem_statistics,
     .syncfs = synchronize_filesystem,
 };

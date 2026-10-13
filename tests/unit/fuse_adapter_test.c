@@ -34,6 +34,8 @@ struct usfs_client_request
     uid_t uid;                  // Credentials selected by the test.
     gid_t gid;                  // Credentials selected by the test.
     pid_t pid;                  // Credentials selected by the test.
+    struct usfs_object_identity identity; // Selected object for vnode-only callbacks.
+    int has_identity;          // Whether identity is supplied by this request.
 };
 
 struct usfs_client
@@ -109,6 +111,11 @@ gid_t usfs_request_gid (const struct usfs_client_request * request)
 pid_t usfs_request_pid (const struct usfs_client_request * request)
 {
     return request->pid;
+}
+
+const struct usfs_object_identity * usfs_request_object_identity (const struct usfs_client_request * request)
+{
+    return request->has_identity ? &request->identity : NULL;
 }
 
 int usfs_directory_add (struct usfs_directory_sink * sink, const char * name, const struct stat * metadata)
@@ -721,7 +728,9 @@ static int directory_backend (
     enum fuse_readdir_flags flags
 )
 {
-    if (path != NULL || offset != 0 || file == NULL || file->fh != 0 || flags != FUSE_READDIR_DEFAULTS)
+    const struct fuse_context * context = fuse_get_context ();
+    if (path != NULL || offset != 0 || file != NULL || flags != FUSE_READDIR_DEFAULTS ||
+        context == NULL || context->object_identity == NULL || context->object_identity->backend_ino != 42)
         ++translated.errors;
     const struct stat metadata = { .st_ino = 42 };
     translated.fill_results[0] = fill (buffer, "one", &metadata, 99, FUSE_FILL_DIR_DEFAULTS);
@@ -803,12 +812,13 @@ static void test_callback_translation (struct tap_state * tap)
     }
     file.value = 0;
     struct usfs_directory_sink sink = { .fail_at = 2 };
-    rc = client->operations.readdir (&client->request, NULL, &file, &sink);
+    const struct usfs_object_identity directory_identity = { .nodeid = 8, .backend_ino = 42, .has_backend_identity = 1 };
+    rc = client->operations.readdir (&client->request, NULL, &directory_identity, &sink);
     tap_ok (
         tap,
         rc == 0 && translated.errors == 0 && sink.calls == 3 && sink.error == ENOSPC && sink.metadata.st_ino == 42 &&
             translated.fill_results[0] == 0 && translated.fill_results[1] == 1 && translated.fill_results[2] == 1,
-        "directory filler reports sticky sink failure without losing metadata or zero handles"
+        "directory filler reports sticky sink failure without borrowing an open handle"
     );
     uint64_t token = 0;
     char path[8];
@@ -959,11 +969,172 @@ static void test_main_results (struct tap_state * tap)
     }
 }
 
+static unsigned contract_errors;
+
+static int plain_unlink (const char * path)
+{
+    (void)path;
+    ++contract_errors;
+    return 0;
+}
+
+static int checked_unlink (const struct fuse_expected_entry * expected)
+{
+    const struct fuse_context * context = fuse_get_context ();
+    if (context == NULL || context->object_identity == NULL || context->object_identity->backend_ino != 77 ||
+        strcmp (expected->path, "/selected") != 0 || expected->parent.nodeid != FUSE_ROOT_NODE_ID ||
+        !expected->exists || expected->object.backend_ino != 77)
+        ++contract_errors;
+
+    return -ESTALE;
+}
+
+static int checked_rmdir (const struct fuse_expected_entry * expected)
+{
+    if (strcmp (expected->path, "/selected") != 0 || !expected->exists)
+        ++contract_errors;
+
+    return -EACCES;
+}
+
+static int checked_rename (const struct fuse_expected_entry * source, const struct fuse_expected_entry * destination)
+{
+    if (strcmp (source->path, "/selected") != 0 || strcmp (destination->path, "/absent") != 0 ||
+        !source->exists || destination->exists || destination->parent.nodeid != FUSE_ROOT_NODE_ID)
+        ++contract_errors;
+
+    return -EIO;
+}
+
+static int contract_pager_acquire (const char * path, const struct fuse_object_identity * identity, struct fuse_pager_file * file)
+{
+    if (strcmp (path, "/selected") != 0 || identity == NULL || identity->backend_ino != 77)
+        ++contract_errors;
+
+    file->value = 0;
+    return 0;
+}
+
+static int contract_pager_authorize (const struct fuse_object_identity * identity, enum fuse_pager_access access)
+{
+    if (identity == NULL || identity->backend_ino != 77)
+        ++contract_errors;
+
+    return access == FUSE_PAGER_READ_ACCESS ? 0 : -EACCES;
+}
+
+static int contract_pager_enable_write (struct fuse_pager_file * file)
+{
+    if (file->value != 0)
+        ++contract_errors;
+
+    file->value = 5;
+    return 0;
+}
+
+static ssize_t contract_pager_read (char * buffer, size_t size, off_t offset, struct fuse_pager_file * file)
+{
+    if (size != 3 || offset != 7 || file->value != 5)
+        ++contract_errors;
+
+    memcpy (buffer, "abc", 3);
+    return 3;
+}
+
+static ssize_t contract_pager_write (const char * buffer, size_t size, off_t offset, struct fuse_pager_file * file)
+{
+    if (size != 3 || offset != 7 || file->value != 5 || memcmp (buffer, "abc", 3) != 0)
+        ++contract_errors;
+
+    return 3;
+}
+
+static int contract_pager_release (struct fuse_pager_file * file)
+{
+    if (file->value != 5)
+        ++contract_errors;
+
+    file->value = 0;
+    return 0;
+}
+
+static void test_object_contract (struct tap_state * tap)
+{
+    reset_native ();
+    contract_errors = 0;
+
+    const struct fuse_operations plain_operations = { .unlink = plain_unlink };
+    struct fuse * fuse = create_adapter (&plain_operations, sizeof (plain_operations), NULL);
+    if (fuse == NULL)
+        abort ();
+
+    tap_ok (tap, native.latest->operations.unlink == NULL && native.latest->operations.pager_acquire == NULL,
+            "path-only mutation and absent pager callbacks remain unsupported");
+    fuse_destroy (fuse);
+
+    const struct fuse_operations checked_operations = {
+        .unlink_checked = checked_unlink,
+        .rmdir_checked = checked_rmdir,
+        .rename_checked = checked_rename,
+        .pager_acquire = contract_pager_acquire,
+        .pager_authorize = contract_pager_authorize,
+        .pager_enable_write = contract_pager_enable_write,
+        .pager_read = contract_pager_read,
+        .pager_write = contract_pager_write,
+        .pager_release = contract_pager_release,
+    };
+    fuse = create_adapter (&checked_operations, sizeof (checked_operations), NULL);
+    if (fuse == NULL)
+        abort ();
+
+    struct usfs_client * client = native.latest;
+    client->request.has_identity = 1;
+    client->request.identity.nodeid = 7;
+    client->request.identity.backend_ino = 77;
+    client->request.identity.backend_type = S_IFREG;
+    client->request.identity.has_backend_identity = 1;
+
+    const struct usfs_expected_entry source = {
+        .path = "/selected",
+        .parent = { .nodeid = USFS_ROOT_NODE_ID },
+        .object = client->request.identity,
+        .exists = 1,
+    };
+    const struct usfs_expected_entry destination = {
+        .path = "/absent",
+        .parent = { .nodeid = USFS_ROOT_NODE_ID },
+    };
+    const int checked_results = client->operations.unlink (&client->request, &source) == -ESTALE &&
+                                client->operations.rmdir (&client->request, &source) == -EACCES &&
+                                client->operations.rename (&client->request, &source, &destination) == -EIO;
+    tap_ok (tap, checked_results && contract_errors == 0 && fuse_get_context () == NULL,
+            "selected parent, child, and absence reach checked callbacks with scoped identity");
+
+    struct usfs_pager_file pager = { .value = 19 };
+    const int acquire_result = client->operations.pager_acquire (&client->request, "/selected", &pager);
+    const int read_authorization = client->operations.pager_authorize (&client->request, USFS_PAGER_READ_ACCESS);
+    const int write_authorization = client->operations.pager_authorize (&client->request, USFS_PAGER_WRITE_ACCESS);
+    tap_ok (tap, acquire_result == 0 && pager.value == 0 && read_authorization == 0 &&
+            write_authorization == -EACCES && contract_errors == 0,
+            "pager acquisition accepts zero resource values and preserves per-mapping authorization");
+
+    char buffer[3] = { 0 };
+    const int enable_result = client->operations.pager_enable_write (&client->request, &pager);
+    const ssize_t read_result = client->operations.pager_read (&client->request, buffer, sizeof (buffer), 7, &pager);
+    const ssize_t write_result = client->operations.pager_write (&client->request, buffer, sizeof (buffer), 7, &pager);
+    const int release_result = client->operations.pager_release (&client->request, &pager);
+    tap_ok (tap, enable_result == 0 && read_result == 3 && write_result == 3 && release_result == 0 &&
+            pager.value == 0 && contract_errors == 0 && fuse_get_context () == NULL,
+            "pager read, write, and release use only the acquired object resource");
+
+    fuse_destroy (fuse);
+}
+
 int main (void)
 {
     struct tap_state tap;
     /* 43 migrated boundary assertions plus 31 interface and startup cases. */
-    tap_plan (&tap, 74);
+    tap_plan (&tap, 78);
     test_context_allocation (&tap);        /* 2 */
     test_public_basics (&tap);             /* 4 */
     test_command_line (&tap);              /* 8 */
@@ -973,6 +1144,7 @@ int main (void)
     test_configuration (&tap);             /* 2 */
     test_nested_and_thread_context (&tap); /* 2 */
     test_callback_translation (&tap);      /* 10 */
+    test_object_contract (&tap);           /* 4 */
     test_lifecycle_forwarding (&tap);      /* 7 */
     test_main_results (&tap);              /* 14 */
     return tap_finish (&tap);

@@ -8,6 +8,7 @@ Today it's a technical preview. The core functionality works, with known issues.
 You can run the provided examples or conduct your own experiments.
 Do not use this preview in production. Kernel extension failures can crash the system.
 Upgrade from this version will not be supported.
+Before porting a backend, check the [current FUSE compatibility guide](docs/compatibility.md).
 
 ## Build
 
@@ -17,7 +18,7 @@ metadata use the build host's AIX version, and the RPM requires that host's exac
 `AIX-rpm` version-release. Build on AIX 7.2 to produce an AIX 7.2 package.
 
 Configuration downloads the native client from `https://github.com/hettica/usfs.git`
-at the pinned commit `52b65a4018454f56748c171550fad316d1cc11fb`:
+at the pinned commit `d888e9574addbd51b757770706381a1d0a594f45`:
 
 ```sh
 cmake -S . -B build
@@ -42,7 +43,16 @@ The RPM installs `/usr/lib/libfuse3.a`, `/usr/include/fuse3`, `fuse3.pc`,
 `aix_fuse_mirror`, and `aix_fuse_memfs`. It has no dependency on a separate USFS
 RPM. Mounting still requires a compatible configured USFS kernel extension,
 which can be installed separately with the USFS RPM. Missing device,
-permission, and protocol errors are reported at runtime.
+permission, and protocol errors are reported at runtime. This adapter
+embeds USFS client API 4 and requires a kernel extension using protocol 12.
+
+USFS requires atomic object checks for `unlink`, `rmdir`, and `rename`.
+Filesystems must supply the optional `*_checked` callbacks to enable
+these operations. Ordinary pathname FUSE callbacks cannot satisfy that
+contract. Mapped I/O requires the optional `pager_*` callbacks, which
+retain one resource per file object through close, rename, and unlink.
+Directory listing receives no per-open handle: `readdir` gets NULL `fi`
+and can use `fuse_get_context()->object_identity`.
 
 Run as root on an isolated, recoverable AIX host with a compatible USFS kernel
 already configured. Run the installation command from this repository's root.

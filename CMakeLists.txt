@@ -33,7 +33,7 @@ set(AIX_FUSE_PACKAGE_RELEASE "1" CACHE STRING "RPM package release")
 set(AIX_FUSE_COMPAT_VERSION "3.19.0")
 set(AIX_FUSE_USFS_SOURCE_DIR "" CACHE PATH "Existing USFS source tree used instead of downloading")
 set(AIX_FUSE_USFS_REPOSITORY "https://github.com/hettica/usfs.git" CACHE STRING "Native USFS repository")
-set(AIX_FUSE_USFS_REVISION "52b65a4018454f56748c171550fad316d1cc11fb"
+set(AIX_FUSE_USFS_REVISION "d888e9574addbd51b757770706381a1d0a594f45"
     CACHE STRING "Published immutable 40-character USFS commit")
 
 if(AIX_FUSE_USFS_SOURCE_DIR)

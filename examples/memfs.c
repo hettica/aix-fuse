@@ -440,6 +440,8 @@ static void handle_close (const uint64_t handle_id)
 
 /* Resolves the inode an operation should act on, preferring an open handle so
    that a file unlinked while open is still reachable. */
+static struct mem_inode * find_live_inode_by_id (uint64_t token);
+
 static struct mem_inode * find_operation_inode (const char * path, struct fuse_file_info * file_info)
 {
     if (file_info != NULL && file_info->fh != 0)
@@ -449,7 +451,18 @@ static struct mem_inode * find_operation_inode (const char * path, struct fuse_f
         return file_handle != NULL ? file_handle->inode : NULL;
     }
 
-    return resolve (path, NULL, NULL);
+    const struct fuse_context * context = fuse_get_context ();
+    const struct fuse_object_identity * identity = context != NULL ? context->object_identity : NULL;
+    if (identity != NULL && identity->has_backend_identity)
+    {
+        struct mem_inode * inode = find_live_inode_by_id (identity->backend_ino);
+        if (inode != NULL && (inode->mode & S_IFMT) == identity->backend_type)
+            return inode;
+
+        return NULL;
+    }
+
+    return path != NULL ? resolve (path, NULL, NULL) : NULL;
 }
 
 static void fill_file_attributes (const struct mem_inode * inode, struct stat * file_attributes)
@@ -1176,12 +1189,37 @@ static int create_hard_link_locked (const char * source_path, const char * desti
     return add_directory_entry (destination_directory_inode, destination_entry_name, source_inode);
 }
 
-static int remove_file_locked (const char * path)
+/* The checks and mutation run under g_memfs_lock. Inode IDs are not reused. */
+static int expected_inode_matches (const struct mem_inode * inode, const struct fuse_object_identity * identity)
 {
+    if (identity->nodeid == FUSE_ROOT_NODE_ID)
+        return inode == g_root;
+
+    return inode != NULL && identity->has_backend_identity && inode->ino == identity->backend_ino &&
+           (inode->mode & S_IFMT) == identity->backend_type;
+}
+
+static int expected_entry_matches (const struct fuse_expected_entry * expected, const struct mem_inode * parent, const struct mem_inode * inode)
+{
+    if (!expected_inode_matches (parent, &expected->parent))
+        return false;
+
+    if (!expected->exists)
+        return inode == NULL;
+
+    return expected_inode_matches (inode, &expected->object);
+}
+
+static int remove_file_locked (const struct fuse_expected_entry * expected)
+{
+    const char * path = expected->path;
     struct mem_inode * parent_inode;
     const char * entry_name;
     struct mem_inode * inode = resolve (path, &parent_inode, &entry_name);
     struct mem_dirent * directory_entry;
+
+    if (!expected_entry_matches (expected, parent_inode, inode))
+        return -ESTALE;
 
     if (inode == NULL)
         return -ENOENT;
@@ -1204,12 +1242,16 @@ static int remove_file_locked (const char * path)
     return 0;
 }
 
-static int remove_directory_locked (const char * path)
+static int remove_directory_locked (const struct fuse_expected_entry * expected)
 {
+    const char * path = expected->path;
     struct mem_inode * parent_inode;
     const char * entry_name;
     struct mem_inode * inode = resolve (path, &parent_inode, &entry_name);
     struct mem_dirent * directory_entry;
+
+    if (!expected_entry_matches (expected, parent_inode, inode))
+        return -ESTALE;
 
     if (inode == NULL)
         return -ENOENT;
@@ -1264,8 +1306,14 @@ static int validate_rename_destination (const struct mem_inode * source_inode, c
     return 0;
 }
 
-static int rename_entry_locked (const char * source_path, const char * destination_path, const unsigned int flags)
+static int rename_entry_locked (
+    const struct fuse_expected_entry * source_entry,
+    const struct fuse_expected_entry * destination_expectation,
+    const unsigned int flags
+)
 {
+    const char * source_path = source_entry->path;
+    const char * destination_path = destination_expectation->path;
     char source_entry_name[MEMFS_NAME_MAX + 1];
     char destination_entry_name[MEMFS_NAME_MAX + 1];
     struct mem_inode * source_directory_inode;
@@ -1282,6 +1330,9 @@ static int rename_entry_locked (const char * source_path, const char * destinati
     /* resolve reports the final name out of one static buffer, so each name
        has to be copied before the next call overwrites it. */
     source_inode = resolve (source_path, &source_directory_inode, &entry_name);
+    if (!expected_entry_matches (source_entry, source_directory_inode, source_inode))
+        return -ESTALE;
+
     if (source_inode == NULL)
         return -ENOENT;
 
@@ -1294,6 +1345,9 @@ static int rename_entry_locked (const char * source_path, const char * destinati
     strcpy (source_entry_name, entry_name);
 
     destination_inode = resolve (destination_path, &destination_directory_inode, &entry_name);
+    if (!expected_entry_matches (destination_expectation, destination_directory_inode, destination_inode))
+        return -ESTALE;
+
     if (destination_directory_inode == NULL)
         return -ENOENT;
 
@@ -1653,24 +1707,89 @@ static int memfs_link (const char * from, const char * to)
     MEMFS_LOCKED_CALL (create_hard_link_locked (from, to));
 }
 
-static int memfs_unlink (const char * path)
+static int memfs_unlink (const struct fuse_expected_entry * expected)
 {
-    MEMFS_LOCKED_CALL (remove_file_locked (path));
+    MEMFS_LOCKED_CALL (remove_file_locked (expected));
 }
 
-static int remove_directory (const char * path)
+static int remove_directory (const struct fuse_expected_entry * expected)
 {
-    MEMFS_LOCKED_CALL (remove_directory_locked (path));
+    MEMFS_LOCKED_CALL (remove_directory_locked (expected));
 }
 
-static int memfs_rename (const char * source_path, const char * destination_path, const unsigned int flags)
+static int memfs_rename (const struct fuse_expected_entry * source, const struct fuse_expected_entry * destination)
 {
-    MEMFS_LOCKED_CALL (rename_entry_locked (source_path, destination_path, flags));
+    MEMFS_LOCKED_CALL (rename_entry_locked (source, destination, 0));
 }
 
 static int memfs_write (const char * path, const char * buffer, size_t requested_bytes, const off_t offset, struct fuse_file_info * file_info)
 {
     MEMFS_LOCKED_CALL (write_file_locked (path, buffer, requested_bytes, offset, file_info));
+}
+
+static int acquire_pager_file_locked (
+    const char * path,
+    const struct fuse_object_identity * identity,
+    struct fuse_pager_file * pager_file
+)
+{
+    if (identity == NULL || !identity->has_backend_identity)
+        return -ESTALE;
+
+    struct mem_inode * inode = find_live_inode_by_id (identity->backend_ino);
+    if (inode == NULL || (inode->mode & S_IFMT) != identity->backend_type)
+        return -ESTALE;
+
+    if (path != NULL && resolve (path, NULL, NULL) != inode)
+        return -ESTALE;
+
+    if (!S_ISREG (inode->mode))
+        return -EINVAL;
+
+    const uint64_t handle_id = open_file_handle (inode, O_RDWR);
+    if (handle_id == 0)
+        return -ENOMEM;
+
+    pager_file->value = handle_id + 1;
+
+    return 0;
+}
+
+static int acquire_pager_file (const char * path, const struct fuse_object_identity * identity, struct fuse_pager_file * pager_file)
+{
+    MEMFS_LOCKED_CALL (acquire_pager_file_locked (path, identity, pager_file));
+}
+
+static int authorize_pager_mapping (const struct fuse_object_identity * identity, enum fuse_pager_access access)
+{
+    if (identity == NULL)
+        return -ESTALE;
+
+    return access == FUSE_PAGER_READ_ACCESS || access == FUSE_PAGER_WRITE_ACCESS ? 0 : -EINVAL;
+}
+
+static int enable_pager_write (struct fuse_pager_file * pager_file)
+{
+    (void)pager_file;
+    return 0;
+}
+
+static ssize_t read_pager_file (char * buffer, size_t requested_bytes, off_t offset, struct fuse_pager_file * pager_file)
+{
+    struct fuse_file_info file_info = { .fh = pager_file->value, .flags = O_RDWR };
+    MEMFS_LOCKED_CALL (read_file_locked (NULL, buffer, requested_bytes, offset, &file_info));
+}
+
+static ssize_t write_pager_file (const char * buffer, size_t requested_bytes, off_t offset, struct fuse_pager_file * pager_file)
+{
+    struct fuse_file_info file_info = { .fh = pager_file->value, .flags = O_RDWR };
+    MEMFS_LOCKED_CALL (write_file_locked (NULL, buffer, requested_bytes, offset, &file_info));
+}
+
+static int release_pager_file (struct fuse_pager_file * pager_file)
+{
+    struct fuse_file_info file_info = { .fh = pager_file->value, .flags = O_RDWR };
+    MEMFS_LOCKED_CALL (release_file_locked (NULL, &file_info));
 }
 
 static int change_file_permissions (const char * path, const mode_t mode, struct fuse_file_info * file_info)
@@ -1712,10 +1831,10 @@ static const struct fuse_operations filesystem_operations = {
     .readlink = read_symbolic_link,
     .readdir = read_directory,
     .mkdir = memfs_mkdir,
-    .unlink = memfs_unlink,
-    .rmdir = remove_directory,
+    .unlink_checked = memfs_unlink,
+    .rmdir_checked = remove_directory,
     .symlink = memfs_symlink,
-    .rename = memfs_rename,
+    .rename_checked = memfs_rename,
     .link = memfs_link,
     .chmod = change_file_permissions,
     .chown = change_file_owner,
@@ -1731,6 +1850,12 @@ static const struct fuse_operations filesystem_operations = {
     .flush = flush_file,
     .fsync = synchronize_file,
     .release = memfs_release,
+    .pager_acquire = acquire_pager_file,
+    .pager_authorize = authorize_pager_mapping,
+    .pager_enable_write = enable_pager_write,
+    .pager_read = read_pager_file,
+    .pager_write = write_pager_file,
+    .pager_release = release_pager_file,
     .statfs = memfs_statfs,
     .syncfs = synchronize_filesystem,
     .export_id = export_object_id,
