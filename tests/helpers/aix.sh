@@ -233,7 +233,7 @@ aix_fuse_wait_until()
 # it must remain outstanding until the backend publishes the renamed path.
 aix_fuse_namespace_case()
 (
-    ns_base="/tmp/aix-fuse-namespace.$$"
+    ns_base="${TMPDIR:-/tmp}/aix-fuse-namespace.$$"
     ns_mount="$ns_base/mnt"
     ns_pids=""
     ns_mounted() { mount | grep -q " $ns_mount "; }

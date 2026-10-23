@@ -18,7 +18,9 @@ metadata use the build host's AIX version, and the RPM requires that host's exac
 `AIX-rpm` version-release. Build on AIX 7.2 to produce an AIX 7.2 package.
 
 Configuration downloads the native client from `https://github.com/hettica/usfs.git`
-at the pinned commit `d888e9574addbd51b757770706381a1d0a594f45`:
+at the [USFS v0.1.0-alpha release](https://github.com/hettica/usfs/releases/tag/v0.1.0-alpha),
+pinned to commit `7bc624ecd2283615e71bd6a765701e03d7042e43`.
+The published USFS alpha package targets AIX 7.3.
 
 ```sh
 cmake -S . -B build
@@ -88,6 +90,15 @@ The adapter embeds native client objects, so applications do not link
 a separate native library. Updating an installed USFS RPM does not update these
 embedded objects. Rebuild aix-fuse and relink applications for relevant native
 client fixes. 
+
+## Test
+
+On a prepared AIX host with a compatible USFS kernel configured, run
+`make test` and `make test-e2e` from the build directory. The end-to-end tests
+mount temporary filesystems and require root. Their fixtures and logs use
+`${TMPDIR:-/tmp}`; set `TMPDIR` to an absolute, writable directory with enough
+space when `/tmp` is constrained. Use a directory traversable by test users
+for the permission checks.
 
 ## Licensing
 

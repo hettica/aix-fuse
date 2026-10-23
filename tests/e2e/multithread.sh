@@ -16,7 +16,7 @@ set -u
 exec </dev/null
 . "${AIX_FUSE_SOURCE_DIR:?}/tests/helpers/aix.sh"
 
-BASE=/tmp/aix-fuse-mt.$$
+BASE=${TMPDIR:-/tmp}/aix-fuse-mt.$$
 MOUNT=$BASE/mount
 STATUS=$BASE/status
 DAEMON=${AIX_FUSE_MT_DAEMON:?}

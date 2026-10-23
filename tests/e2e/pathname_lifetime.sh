@@ -7,7 +7,7 @@
 set -u
 . "${AIX_FUSE_SOURCE_DIR:?}/tests/helpers/aix.sh"
 
-BASE=/tmp/aix-fuse-path-lifetime.$$
+BASE=${TMPDIR:-/tmp}/aix-fuse-path-lifetime.$$
 DAEMON=${AIX_FUSE_PATH_DAEMON:?}
 DAEMON_PID=0
 MOUNT=$BASE/mount

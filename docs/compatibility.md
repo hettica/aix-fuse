@@ -137,7 +137,3 @@ Extensions do not recover a per-open handle for `readdir`, `fsync` or page fault
 - A mutable filesystem that needs `rm` and `mv` must implement the checked mutation extensions now. If it also needs `mmap`, it needs the pager extension and an object that survives close and unlink.
 - A backend whose directory view depends on each open's private iterator, or whose policy must be decided by `.access`, cannot preserve those behaviors simply by recompiling against this adapter.
 - A backend that implements only `read_buf`/`write_buf`, or relies on locks, xattrs or custom ioctls, needs different callbacks or additional USFS/adapter implementation before the corresponding operations can work.
-
-## Scope and evidence
-
-This guide describes the current adapter with its pinned USFS commit `d888e9574addbd51b757770706381a1d0a594f45` (wire protocol 12, client API 4). Its upstream comparison is the local libfuse snapshot `b45649f5195414f8a038f10ff85034e3c27ebc36`, which reports **3.19.0-rc0**; the adapter labels its API **3.19.0**. The classifications come from a source and AIX-contract review, not a new runtime qualification of arbitrary backends. For per-callback source locations, exact contracts and evidence limits, see the [full compatibility review](../FUSE_CALLBACK_COMPATIBILITY_REVIEW.md).

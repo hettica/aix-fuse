@@ -37,7 +37,7 @@ set -u
 exec </dev/null
 . "${AIX_FUSE_SOURCE_DIR:?}/tests/helpers/aix.sh"
 : "${AIX_FUSE_IO_PROBE:?}"
-WORK_ROOT=/tmp/aix-fuse-memfs.$$
+WORK_ROOT=${TMPDIR:-/tmp}/aix-fuse-memfs.$$
 (umask 077; mkdir "$WORK_ROOT") || exit 1
 chmod 755 "$WORK_ROOT" || exit 1
 AIX_FUSE_DAEMON_FILE=$WORK_ROOT/daemons
